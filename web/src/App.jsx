@@ -5,20 +5,26 @@ import RecommendationsSection from "./components/RecommendationsSection";
 import SearchBar from "./components/SearchBar";
 import {
   buildCandidatePool,
-  buildGenreBonusMap,
   clampRating,
-  computeGenreBonus,
   computeGenrePreferences,
-  getTopRatedMovies,
   getUserIdx,
   loadAppData,
   searchMovies,
 } from "./lib/data";
 import { predictMoviesForUser } from "./lib/onnx-runtime";
+import {
+  computeGlobalMeanRating,
+  getMatchLabel,
+  scoreMovieForRanking,
+} from "./lib/scoring";
 
 const MIN_RATINGS_REQUIRED = 10;
 const TOP_GENRES_FOR_SECTIONS = 3;
 const BASE_USER_ID = 1;
+const BROWSE_AUTO_MIN_COMMUNITY_COUNT = 50;
+const RECOMMENDATION_MIN_COMMUNITY_COUNT = 25;
+const BROWSE_PAGE_SIZE = 12;
+const RECOMMENDATION_ITEMS_PER_SECTION = 20;
 
 const STORAGE_KEYS = {
   ratings: "movie_reco_ratings_v2",
@@ -59,9 +65,11 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [selectedGenre, setSelectedGenre] = useState("");
   const [showRatedMovies, setShowRatedMovies] = useState(false);
+  const [browsePage, setBrowsePage] = useState(0);
 
   const [recommendationState, setRecommendationState] = useState({
     overall: [],
+    fresh: [],
     byGenre: [],
     latencyMs: 0,
   });
@@ -105,22 +113,12 @@ export default function App() {
     [ratingsByMovieId]
   );
 
-  const quickRatingMovies = useMemo(() => {
-    if (!data) {
-      return [];
-    }
-    return getTopRatedMovies({
-      movies: data.movies,
-      statsByMovieId: data.statsByMovieId,
-      limit: 5,
-    });
-  }, [data]);
-
   const browseMovies = useMemo(() => {
     if (!data) {
       return [];
     }
 
+    const browseLimit = data.movies.length;
     const hasFilter = query.trim() || selectedGenre;
     if (!hasFilter) {
       return searchMovies({
@@ -128,7 +126,8 @@ export default function App() {
         statsByMovieId: data.statsByMovieId,
         query: "",
         genre: "",
-        limit: 20,
+        minCommunityCount: BROWSE_AUTO_MIN_COMMUNITY_COUNT,
+        limit: browseLimit,
       });
     }
 
@@ -137,9 +136,30 @@ export default function App() {
       statsByMovieId: data.statsByMovieId,
       query,
       genre: selectedGenre,
-      limit: 20,
+      minCommunityCount: 0,
+      limit: browseLimit,
     });
   }, [data, query, selectedGenre]);
+
+  useEffect(() => {
+    setBrowsePage(0);
+  }, [query, selectedGenre, data]);
+
+  const browsePageCount = useMemo(() => {
+    if (!browseMovies.length) {
+      return 1;
+    }
+    return Math.max(1, Math.ceil(browseMovies.length / BROWSE_PAGE_SIZE));
+  }, [browseMovies]);
+
+  useEffect(() => {
+    setBrowsePage((prev) => Math.min(prev, browsePageCount - 1));
+  }, [browsePageCount]);
+
+  const visibleBrowseMovies = useMemo(() => {
+    const start = browsePage * BROWSE_PAGE_SIZE;
+    return browseMovies.slice(start, start + BROWSE_PAGE_SIZE);
+  }, [browseMovies, browsePage]);
 
   const genrePreferences = useMemo(() => {
     if (!data) {
@@ -181,6 +201,7 @@ export default function App() {
     if (!data || ratedCount < MIN_RATINGS_REQUIRED) {
       setRecommendationState({
         overall: [],
+        fresh: [],
         byGenre: [],
         latencyMs: 0,
       });
@@ -202,6 +223,7 @@ export default function App() {
       const start = performance.now();
 
       try {
+        const globalMean = computeGlobalMeanRating(data.statsByMovieId);
         const candidatePool = buildCandidatePool({
           movies: data.movies,
           genreToMovies: data.genreToMovies,
@@ -218,7 +240,6 @@ export default function App() {
           movie2idx: data.metadata.movie2idx,
         });
 
-        const genreBonusMap = buildGenreBonusMap(genrePreferences);
         const scored = candidatePool
           .map((movie) => {
             const predicted = predictionMap.get(movie.movie_id);
@@ -226,30 +247,93 @@ export default function App() {
               return null;
             }
 
-            const genreBonus = computeGenreBonus(movie.genres, genreBonusMap);
+            const communityStats = data.statsByMovieId.get(movie.movie_id) || null;
+            const communityAvg = Number(communityStats?.avg_rating);
+            const communityCount = Number(communityStats?.num_ratings);
+            const {
+              predClamped,
+              bayesAvg,
+              finalScore,
+              communityCount: normalizedCount,
+            } = scoreMovieForRanking({
+              predictedRating: predicted,
+              communityAvg,
+              communityCount,
+              globalMean,
+            });
+
             return {
               movie,
-              predictedRating: predicted,
-              finalScore: predicted + genreBonus,
+              predictedRating: predClamped,
+              matchLabel: getMatchLabel(predClamped),
+              bayesAvg,
+              communityCount: normalizedCount,
+              finalScore,
             };
           })
           .filter(Boolean)
           .sort((a, b) => b.finalScore - a.finalScore);
 
-        const overall = scored.slice(0, 5);
+        const eligibleScored = scored.filter(
+          (item) => item.communityCount >= RECOMMENDATION_MIN_COMMUNITY_COUNT
+        );
+
+        const shownMovieIds = new Set(
+          Object.keys(ratingsByMovieId)
+            .map((value) => Number(value))
+            .filter((value) => Number.isFinite(value))
+        );
+
+        const pickUnique = (items, limit, predicate = () => true) => {
+          const picked = [];
+          for (const item of items) {
+            const movieId = Number(item.movie.movie_id);
+            if (!Number.isFinite(movieId) || shownMovieIds.has(movieId)) {
+              continue;
+            }
+            if (!predicate(item)) {
+              continue;
+            }
+            shownMovieIds.add(movieId);
+            picked.push(item);
+            if (picked.length >= limit) {
+              break;
+            }
+          }
+          return picked;
+        };
+
+        const overall = pickUnique(eligibleScored, RECOMMENDATION_ITEMS_PER_SECTION);
+        const freshByCommunity = [...eligibleScored].sort((a, b) => {
+          if (b.communityCount !== a.communityCount) {
+            return b.communityCount - a.communityCount;
+          }
+          return b.finalScore - a.finalScore;
+        });
+        const fresh = pickUnique(
+          freshByCommunity,
+          RECOMMENDATION_ITEMS_PER_SECTION,
+          (item) => item.communityCount >= RECOMMENDATION_MIN_COMMUNITY_COUNT
+        );
+
         const topGenres = genrePreferences
           .slice(0, TOP_GENRES_FOR_SECTIONS)
           .map((item) => item.genre);
 
         const byGenre = topGenres.map((genre) => ({
           genre,
-          items: scored.filter((item) => item.movie.genres.includes(genre)).slice(0, 5),
+          items: pickUnique(
+            eligibleScored,
+            RECOMMENDATION_ITEMS_PER_SECTION,
+            (item) => item.movie.genres.includes(genre)
+          ),
         }));
 
         const latencyMs = performance.now() - start;
         if (!cancelled) {
           setRecommendationState({
             overall,
+            fresh,
             byGenre,
             latencyMs,
           });
@@ -303,6 +387,7 @@ export default function App() {
     setRecommendationError("");
     setRecommendationState({
       overall: [],
+      fresh: [],
       byGenre: [],
       latencyMs: 0,
     });
@@ -354,25 +439,6 @@ export default function App() {
 
       <section className="panel">
         <div className="section-head">
-          <h2>Quick ratings</h2>
-          <p>Start with a few popular movies.</p>
-        </div>
-        <div className="movie-grid">
-          {quickRatingMovies.map((movie) => (
-            <MovieCard
-              key={`quick-${movie.movie_id}`}
-              movie={movie}
-              ratingValue={Number(ratingsByMovieId[movie.movie_id] || 0)}
-              onRate={handleRateMovie}
-              showMatch={false}
-              showCommunity={false}
-            />
-          ))}
-        </div>
-      </section>
-
-      <section className="panel">
-        <div className="section-head">
           <h2>Browse movies</h2>
           <p>Search by title or pick a genre.</p>
         </div>
@@ -386,7 +452,7 @@ export default function App() {
         />
 
         <div className="movie-grid">
-          {browseMovies.map((movie) => (
+          {visibleBrowseMovies.map((movie) => (
             <MovieCard
               key={`browse-${movie.movie_id}`}
               movie={movie}
@@ -398,6 +464,33 @@ export default function App() {
             />
           ))}
         </div>
+        {browseMovies.length > BROWSE_PAGE_SIZE ? (
+          <div className="section-pagination">
+            <span className="page-indicator">
+              {browsePage + 1} / {browsePageCount}
+            </span>
+            <button
+              type="button"
+              className="arrow-btn"
+              onClick={() => setBrowsePage((prev) => Math.max(0, prev - 1))}
+              disabled={browsePage <= 0}
+              aria-label="Previous browse page"
+            >
+              &#8592;
+            </button>
+            <button
+              type="button"
+              className="arrow-btn"
+              onClick={() =>
+                setBrowsePage((prev) => Math.min(browsePageCount - 1, prev + 1))
+              }
+              disabled={browsePage >= browsePageCount - 1}
+              aria-label="Next browse page"
+            >
+              &#8594;
+            </button>
+          </div>
+        ) : null}
       </section>
 
       <section className="panel">
@@ -437,6 +530,7 @@ export default function App() {
           latencyMs={recommendationState.latencyMs}
           preferredGenres={genrePreferences}
           overallRecommendations={recommendationState.overall}
+          freshRecommendations={recommendationState.fresh}
           genreRecommendations={recommendationState.byGenre}
           ratingsByMovieId={ratingsByMovieId}
           onRate={handleRateMovie}

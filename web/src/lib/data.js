@@ -205,9 +205,11 @@ export function searchMovies({
   statsByMovieId,
   query = "",
   genre = "",
+  minCommunityCount = 0,
   limit = 30,
 }) {
   const normalizedQuery = query.trim().toLowerCase();
+  const minCount = Math.max(0, Number(minCommunityCount) || 0);
 
   const filtered = movies.filter((movie) => {
     if (genre && !movie.genres.includes(genre)) {
@@ -218,10 +220,24 @@ export function searchMovies({
       return true;
     }
 
-    return movie.title.toLowerCase().includes(normalizedQuery);
+    if (!movie.title.toLowerCase().includes(normalizedQuery)) {
+      return false;
+    }
+
+    return true;
   });
 
-  return filtered
+  const filteredByCount = filtered.filter((movie) => {
+    if (minCount <= 0) {
+      return true;
+    }
+
+    const stats = statsByMovieId?.get(movie.movie_id);
+    const n = Number(stats?.num_ratings);
+    return Number.isFinite(n) && n >= minCount;
+  });
+
+  return filteredByCount
     .sort((a, b) => {
       const hasStats = statsByMovieId && statsByMovieId.size > 0;
       if (hasStats) {
