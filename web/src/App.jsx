@@ -14,14 +14,14 @@ import {
   loadAppData,
   searchMovies,
 } from "./lib/data";
-import { predictMoviesForUser } from "./lib/onnx";
+import { predictMoviesForUser } from "./lib/onnx-runtime";
 
 const MIN_RATINGS_REQUIRED = 10;
 const TOP_GENRES_FOR_SECTIONS = 3;
+const BASE_USER_ID = 1;
 
 const STORAGE_KEYS = {
-  ratings: "reco_ratings_v1",
-  demoUserId: "reco_demo_user_id_v1",
+  ratings: "movie_reco_ratings_v2",
 };
 
 function parseStoredRatings() {
@@ -56,23 +56,14 @@ export default function App() {
   const [dataError, setDataError] = useState("");
 
   const [ratingsByMovieId, setRatingsByMovieId] = useState(parseStoredRatings);
-
   const [query, setQuery] = useState("");
   const [selectedGenre, setSelectedGenre] = useState("");
-
-  const [demoUserInput, setDemoUserInput] = useState(
-    () => localStorage.getItem(STORAGE_KEYS.demoUserId) || "1"
-  );
-  const [activeDemoUserId, setActiveDemoUserId] = useState(
-    () => localStorage.getItem(STORAGE_KEYS.demoUserId) || "1"
-  );
-  const [demoUserError, setDemoUserError] = useState("");
+  const [showRatedMovies, setShowRatedMovies] = useState(false);
 
   const [recommendationState, setRecommendationState] = useState({
     overall: [],
     byGenre: [],
     latencyMs: 0,
-    candidateCount: 0,
   });
   const [recommendationLoading, setRecommendationLoading] = useState(false);
   const [recommendationError, setRecommendationError] = useState("");
@@ -109,45 +100,12 @@ export default function App() {
     localStorage.setItem(STORAGE_KEYS.ratings, JSON.stringify(ratingsByMovieId));
   }, [ratingsByMovieId]);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.demoUserId, String(activeDemoUserId));
-  }, [activeDemoUserId]);
-
-  useEffect(() => {
-    if (!data) {
-      return;
-    }
-
-    const fallbackId = Object.prototype.hasOwnProperty.call(
-      data.metadata.user2idx,
-      "1"
-    )
-      ? "1"
-      : Object.keys(data.metadata.user2idx)[0] || "";
-
-    const currentValid = Object.prototype.hasOwnProperty.call(
-      data.metadata.user2idx,
-      String(activeDemoUserId)
-    );
-    if (currentValid) {
-      return;
-    }
-
-    if (fallbackId) {
-      setActiveDemoUserId(fallbackId);
-      setDemoUserInput(fallbackId);
-      setDemoUserError("");
-    } else {
-      setDemoUserError("No valid Demo User ID was found in metadata.user2idx.");
-    }
-  }, [data, activeDemoUserId]);
-
   const ratedCount = useMemo(
     () => Object.keys(ratingsByMovieId).length,
     [ratingsByMovieId]
   );
 
-  const initialTopMovies = useMemo(() => {
+  const quickRatingMovies = useMemo(() => {
     if (!data) {
       return [];
     }
@@ -158,14 +116,20 @@ export default function App() {
     });
   }, [data]);
 
-  const movieListToRate = useMemo(() => {
+  const browseMovies = useMemo(() => {
     if (!data) {
       return [];
     }
 
     const hasFilter = query.trim() || selectedGenre;
     if (!hasFilter) {
-      return initialTopMovies;
+      return searchMovies({
+        movies: data.movies,
+        statsByMovieId: data.statsByMovieId,
+        query: "",
+        genre: "",
+        limit: 20,
+      });
     }
 
     return searchMovies({
@@ -173,9 +137,9 @@ export default function App() {
       statsByMovieId: data.statsByMovieId,
       query,
       genre: selectedGenre,
-      limit: 24,
+      limit: 20,
     });
-  }, [data, query, selectedGenre, initialTopMovies]);
+  }, [data, query, selectedGenre]);
 
   const genrePreferences = useMemo(() => {
     if (!data) {
@@ -187,12 +151,31 @@ export default function App() {
     });
   }, [data, ratingsByMovieId]);
 
-  const activeUserIdx = useMemo(() => {
+  const baseUserIdx = useMemo(() => {
     if (!data) {
       return null;
     }
-    return getUserIdx(data.metadata, activeDemoUserId);
-  }, [data, activeDemoUserId]);
+    return getUserIdx(data.metadata, BASE_USER_ID);
+  }, [data]);
+
+  const ratedMovies = useMemo(() => {
+    if (!data) {
+      return [];
+    }
+
+    return Object.entries(ratingsByMovieId)
+      .map(([movieId, rating]) => ({
+        movie: data.moviesById.get(Number(movieId)),
+        rating: Number(rating),
+      }))
+      .filter((item) => item.movie && Number.isFinite(item.rating))
+      .sort((a, b) => {
+        if (b.rating !== a.rating) {
+          return b.rating - a.rating;
+        }
+        return a.movie.title.localeCompare(b.movie.title);
+      });
+  }, [data, ratingsByMovieId]);
 
   useEffect(() => {
     if (!data || ratedCount < MIN_RATINGS_REQUIRED) {
@@ -200,17 +183,14 @@ export default function App() {
         overall: [],
         byGenre: [],
         latencyMs: 0,
-        candidateCount: 0,
       });
       setRecommendationError("");
       setRecommendationLoading(false);
       return;
     }
 
-    if (!Number.isFinite(activeUserIdx)) {
-      setRecommendationError(
-        `Demo User ID "${activeDemoUserId}" does not exist in metadata.user2idx.`
-      );
+    if (!Number.isFinite(baseUserIdx)) {
+      setRecommendationError("Recommendations are temporarily unavailable.");
       return;
     }
 
@@ -232,8 +212,8 @@ export default function App() {
         });
 
         const predictionMap = await predictMoviesForUser({
-          userCacheKey: String(activeDemoUserId),
-          userIdx: activeUserIdx,
+          userCacheKey: `base-user-${BASE_USER_ID}`,
+          userIdx: baseUserIdx,
           movieIds: candidatePool.map((movie) => movie.movie_id),
           movie2idx: data.metadata.movie2idx,
         });
@@ -272,13 +252,15 @@ export default function App() {
             overall,
             byGenre,
             latencyMs,
-            candidateCount: candidatePool.length,
           });
         }
       } catch (error) {
+        // Keep friendly UI text, but expose root cause in console for debugging.
+        // eslint-disable-next-line no-console
+        console.error("Recommendation refresh failed:", error);
         if (!cancelled) {
           setRecommendationError(
-            error?.message || "Failed to generate recommendations."
+            "We could not refresh recommendations right now. Please try again."
           );
         }
       } finally {
@@ -296,8 +278,7 @@ export default function App() {
     data,
     ratedCount,
     ratingsByMovieId,
-    activeDemoUserId,
-    activeUserIdx,
+    baseUserIdx,
     genrePreferences,
   ]);
 
@@ -308,37 +289,29 @@ export default function App() {
     }));
   };
 
-  const applyDemoUserId = (event) => {
-    event.preventDefault();
-
-    if (!data) {
+  const handleClearRatings = () => {
+    const confirmed = window.confirm(
+      "This will delete all your saved ratings. Continue?"
+    );
+    if (!confirmed) {
       return;
     }
 
-    const candidate = demoUserInput.trim();
-    if (!candidate) {
-      setDemoUserError("Demo User ID is required.");
-      return;
-    }
-
-    if (!Object.prototype.hasOwnProperty.call(data.metadata.user2idx, candidate)) {
-      setDemoUserError(
-        `Demo User ID "${candidate}" was not found. Pick one that exists in metadata.user2idx.`
-      );
-      return;
-    }
-
-    setActiveDemoUserId(candidate);
-    setDemoUserError("");
+    localStorage.removeItem(STORAGE_KEYS.ratings);
+    setRatingsByMovieId({});
+    setShowRatedMovies(false);
+    setRecommendationError("");
+    setRecommendationState({
+      overall: [],
+      byGenre: [],
+      latencyMs: 0,
+    });
   };
 
   if (dataLoading) {
     return (
-      <main className="app-shell">
-        <section className="panel">
-          <h1>Movie Recommender</h1>
-          <p>Loading model metadata and movie catalog...</p>
-        </section>
+      <main className="app-shell loading-page">
+        <p>Loading your movie experience...</p>
       </main>
     );
   }
@@ -346,8 +319,8 @@ export default function App() {
   if (dataError) {
     return (
       <main className="app-shell">
-        <section className="panel">
-          <h1>Movie Recommender</h1>
+        <section className="panel center-panel">
+          <h1>Find your next movie</h1>
           <p className="error-text">{dataError}</p>
         </section>
       </main>
@@ -356,92 +329,120 @@ export default function App() {
 
   return (
     <main className="app-shell">
-      <header className="hero">
-        <p className="eyebrow">Browser-only ONNX Inference</p>
-        <h1>Interactive Movie Recommender</h1>
-        <p>
-          Rate movies, infer your genre taste locally, and get recommendations
-          using ONNX predictions in the browser.
-        </p>
-      </header>
-
-      <section className="panel demo-user-panel">
-        <div>
-          <h2>Demo User Profile</h2>
-          <p>
-            The model uses an existing MovieLens user profile as a base. Your own ratings
-            add a local genre bonus for personalization.
-          </p>
+      <nav className="top-nav">
+        <div className="brand">Movie Picks</div>
+        <div className="nav-actions">
+          <div className="rating-pill">{ratedCount} rated</div>
+          <button
+            type="button"
+            className="clear-data-btn"
+            onClick={handleClearRatings}
+            disabled={ratedCount === 0}
+          >
+            Clear ratings
+          </button>
         </div>
-        <form className="demo-user-form" onSubmit={applyDemoUserId}>
-          <label>
-            Demo User ID
-            <input
-              type="number"
-              min="1"
-              value={demoUserInput}
-              onChange={(event) => setDemoUserInput(event.target.value)}
-            />
-          </label>
-          <button type="submit">Apply</button>
-        </form>
-        {demoUserError ? <p className="error-text">{demoUserError}</p> : null}
-        {!demoUserError ? (
-          <p className="active-user-line">
-            Active Demo User ID: <strong>{activeDemoUserId}</strong>
-          </p>
-        ) : null}
-      </section>
+      </nav>
 
-      <ProgressBar current={ratedCount} target={MIN_RATINGS_REQUIRED} />
+      <header className="hero-card">
+        <div>
+          <h1>Find your next movie</h1>
+          <p>Rate a few movies to personalize your recommendations.</p>
+        </div>
+        <ProgressBar current={ratedCount} target={MIN_RATINGS_REQUIRED} />
+      </header>
 
       <section className="panel">
         <div className="section-head">
-          <h2>{ratedCount < MIN_RATINGS_REQUIRED ? "Start rating movies" : "Rate more movies"}</h2>
-          <p>
-            {query.trim() || selectedGenre
-              ? "Search by title or filter by genre."
-              : "Showing 5 top-rated movies globally to start (ratings hidden on purpose)."}
-          </p>
+          <h2>Quick ratings</h2>
+          <p>Start with a few popular movies.</p>
         </div>
-
-        <SearchBar
-          query={query}
-          onQueryChange={setQuery}
-          selectedGenre={selectedGenre}
-          onGenreChange={setSelectedGenre}
-          genres={data.allGenres}
-          resultCount={movieListToRate.length}
-        />
-
         <div className="movie-grid">
-          {movieListToRate.map((movie) => (
+          {quickRatingMovies.map((movie) => (
             <MovieCard
-              key={movie.movie_id}
+              key={`quick-${movie.movie_id}`}
               movie={movie}
               ratingValue={Number(ratingsByMovieId[movie.movie_id] || 0)}
               onRate={handleRateMovie}
-              showPredicted={false}
+              showMatch={false}
               showCommunity={false}
             />
           ))}
         </div>
       </section>
 
-      <RecommendationsSection
-        ratedCount={ratedCount}
-        minRatings={MIN_RATINGS_REQUIRED}
-        loading={recommendationLoading}
-        error={recommendationError}
-        latencyMs={recommendationState.latencyMs}
-        candidateCount={recommendationState.candidateCount}
-        preferredGenres={genrePreferences}
-        overallRecommendations={recommendationState.overall}
-        genreRecommendations={recommendationState.byGenre}
-        ratingsByMovieId={ratingsByMovieId}
-        onRate={handleRateMovie}
-        statsByMovieId={data.statsByMovieId}
-      />
+      <section className="panel">
+        <div className="section-head">
+          <h2>Browse movies</h2>
+          <p>Search by title or pick a genre.</p>
+        </div>
+        <SearchBar
+          query={query}
+          onQueryChange={setQuery}
+          selectedGenre={selectedGenre}
+          onGenreChange={setSelectedGenre}
+          genres={data.allGenres}
+          resultCount={browseMovies.length}
+        />
+
+        <div className="movie-grid">
+          {browseMovies.map((movie) => (
+            <MovieCard
+              key={`browse-${movie.movie_id}`}
+              movie={movie}
+              ratingValue={Number(ratingsByMovieId[movie.movie_id] || 0)}
+              onRate={handleRateMovie}
+              showMatch={false}
+              showCommunity
+              communityStats={data.statsByMovieId.get(movie.movie_id) || null}
+            />
+          ))}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="rated-head">
+          <h2>Rated movies</h2>
+          <button
+            type="button"
+            className="toggle-btn"
+            onClick={() => setShowRatedMovies((prev) => !prev)}
+            disabled={!ratedMovies.length}
+          >
+            {showRatedMovies ? "Hide" : "Show"} ({ratedMovies.length})
+          </button>
+        </div>
+        {!ratedMovies.length ? (
+          <p className="empty-note">You have not rated any movies yet.</p>
+        ) : null}
+        {showRatedMovies && ratedMovies.length ? (
+          <ul className="rated-list">
+            {ratedMovies.map((item) => (
+              <li key={`rated-${item.movie.movie_id}`} className="rated-item">
+                <div>
+                  <h3>{item.movie.title}</h3>
+                  <p>{item.movie.genres.join(" | ") || "No genres listed"}</p>
+                </div>
+                <span>{item.rating.toFixed(1)}/5</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </section>
+
+      {ratedCount >= MIN_RATINGS_REQUIRED ? (
+        <RecommendationsSection
+          loading={recommendationLoading}
+          error={recommendationError}
+          latencyMs={recommendationState.latencyMs}
+          preferredGenres={genrePreferences}
+          overallRecommendations={recommendationState.overall}
+          genreRecommendations={recommendationState.byGenre}
+          ratingsByMovieId={ratingsByMovieId}
+          onRate={handleRateMovie}
+          statsByMovieId={data.statsByMovieId}
+        />
+      ) : null}
     </main>
   );
 }

@@ -5,8 +5,8 @@ export default function MovieCard({
   movie,
   ratingValue = 0,
   onRate,
-  predictedRating = null,
-  showPredicted = false,
+  matchScore = null,
+  showMatch = false,
   showCommunity = false,
   communityStats = null,
 }) {
@@ -20,9 +20,9 @@ export default function MovieCard({
         <h3 className="movie-title">{movie.title}</h3>
         <p className="movie-genres">{genresLine}</p>
 
-        {showPredicted && Number.isFinite(predictedRating) ? (
-          <p className="movie-prediction">
-            Predicted rating: <strong>{clampRating(predictedRating).toFixed(2)}</strong>
+        {showMatch && Number.isFinite(matchScore) ? (
+          <p className="movie-match">
+            Match: <strong>{clampRating(matchScore).toFixed(2)}/5</strong>
           </p>
         ) : null}
 

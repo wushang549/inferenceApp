@@ -1,19 +1,16 @@
 export default function GenreChips({ preferences, limit = 8 }) {
-  const visible = preferences.slice(0, limit);
+  const visible = preferences
+    .filter((item) => item.score > 0)
+    .slice(0, limit);
 
   if (!visible.length) {
-    return <p className="empty-note">Rate more movies to infer your preferred genres.</p>;
+    return <p className="empty-note">Rate a few more movies to reveal your favorite genres.</p>;
   }
 
   return (
     <div className="chip-row">
       {visible.map((item) => (
-        <span className="genre-chip" key={item.genre}>
-          {item.genre}
-          <small>
-            score {item.score.toFixed(2)} | n={item.count}
-          </small>
-        </span>
+        <span className="genre-chip" key={item.genre}>{item.genre}</span>
       ))}
     </div>
   );

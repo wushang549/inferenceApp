@@ -1,11 +1,12 @@
 export default function ProgressBar({ current, target }) {
   const ratio = target > 0 ? Math.min(1, current / target) : 0;
   const pct = Math.round(ratio * 100);
+  const remaining = Math.max(0, target - current);
 
   return (
     <section className="progress-card">
       <div className="progress-head">
-        <h2>Rating Progress</h2>
+        <h2>Your progress</h2>
         <p>
           Rated <strong>{current}</strong> / {target}
         </p>
@@ -14,9 +15,9 @@ export default function ProgressBar({ current, target }) {
         <div className="progress-fill" style={{ width: `${pct}%` }} />
       </div>
       <p className="progress-hint">
-        {current < target
-          ? `Rate ${target - current} more movies to unlock recommendations.`
-          : "Recommendations unlocked. Keep rating more movies to refine results."}
+        {remaining > 0
+          ? `Rate ${remaining} more to unlock recommendations.`
+          : "Recommendations unlocked. Keep rating to make them even better."}
       </p>
     </section>
   );

@@ -10,17 +10,17 @@ export default function SearchBar({
     <div className="search-shell">
       <div className="search-row">
         <label className="input-block">
-          <span>Search by title</span>
+          <span>Search</span>
           <input
             type="text"
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
-            placeholder="Type a movie title..."
+            placeholder="Search by title..."
           />
         </label>
 
         <label className="input-block">
-          <span>Filter by genre</span>
+          <span>Genre</span>
           <select
             value={selectedGenre}
             onChange={(event) => onGenreChange(event.target.value)}
@@ -35,7 +35,7 @@ export default function SearchBar({
         </label>
       </div>
 
-      <p className="search-meta">{resultCount} movies shown</p>
+      <p className="search-meta">Showing {resultCount} movies</p>
     </div>
   );
 }
