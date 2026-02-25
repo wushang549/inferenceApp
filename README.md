@@ -68,6 +68,22 @@ npm run preview
 
 ---
 
+## Deploy to GitHub Pages
+
+This repo is configured to deploy the `web/` app to GitHub Pages using GitHub Actions:
+- Workflow file: `.github/workflows/deploy-pages.yml`
+- Vite `base` is set automatically in CI using `GITHUB_REPOSITORY`
+
+To enable it in GitHub:
+1. Go to repository `Settings` -> `Pages`.
+2. In `Build and deployment`, select `Source: GitHub Actions`.
+3. Push to `main` and the site will deploy automatically.
+
+Expected URL format:
+- `https://<your-user>.github.io/inferenceApp/`
+
+---
+
 ## Quick Folder Summary
 
 ```text
@@ -86,4 +102,3 @@ web/
   src/
   package.json
 ```
-
