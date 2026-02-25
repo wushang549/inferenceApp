@@ -1,6 +1,10 @@
-const METADATA_PATH = "/metadata.json";
-const MOVIES_PATH = "/movies.json";
-const MOVIE_STATS_PATH = "/movie_stats.json";
+const baseUrl = import.meta.env.BASE_URL || "/";
+const resolveAssetPath = (assetPath) =>
+  `${baseUrl}${String(assetPath).replace(/^\/+/, "")}`;
+
+const METADATA_PATH = resolveAssetPath("metadata.json");
+const MOVIES_PATH = resolveAssetPath("movies.json");
+const MOVIE_STATS_PATH = resolveAssetPath("movie_stats.json");
 
 let appDataPromise = null;
 

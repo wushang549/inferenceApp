@@ -1,15 +1,17 @@
 import * as ort from "onnxruntime-web";
 
-const MODEL_URL = "/recommender.onnx";
+const baseUrl = import.meta.env.BASE_URL || "/";
+const resolveAssetPath = (assetPath) =>
+  `${baseUrl}${String(assetPath).replace(/^\/+/, "")}`;
+
+const MODEL_URL = resolveAssetPath("recommender.onnx");
 const DEFAULT_BATCH_SIZE = 512;
 
 let sessionPromise = null;
 const predictionCacheByUser = new Map();
 
 function configureOrtRuntime() {
-  ort.env.wasm.wasmPaths = "/";
-  // Keep Vite-compatible runtime resolution: only override the wasm binary URL.
-  ort.env.wasm.wasmPaths = { wasm: "/ort-wasm-simd-threaded.jsep.wasm" };
+  ort.env.wasm.wasmPaths = { wasm: resolveAssetPath("ort-wasm-simd-threaded.jsep.wasm") };
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.simd = true;
 }
